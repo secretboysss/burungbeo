@@ -1,4 +1,4 @@
-// index.js — Final version (Pairing Code, Telegram Notify)
+// index.js — Final (Pairing Code + Telegram Notify, optimized for Railway)
 import fs from "fs-extra";
 import { Telegraf } from "telegraf";
 import {
@@ -7,32 +7,33 @@ import {
   Browsers,
   DisconnectReason,
 } from "@whiskeysockets/baileys";
-import * as dotenv from 'dotenv'
-dotenv.config()
+import * as dotenv from "dotenv";
+dotenv.config();
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const ADMIN_ID = process.env.ADMIN_ID;
 
 if (!BOT_TOKEN || !ADMIN_ID) {
-  console.error("❌ TELEGRAM_BOT_TOKEN dan ADMIN_ID belum diatur di Secrets.");
+  console.error("❌ TELEGRAM_BOT_TOKEN dan ADMIN_ID belum diatur di Secrets/Env.");
   process.exit(1);
 }
 
 const bot = new Telegraf(BOT_TOKEN);
 const AUTH_DIR = "./session";
+fs.ensureDirSync(AUTH_DIR);
+
+let globalSock = null; // supaya tidak bikin socket baru terus
 
 async function createSocket() {
   try {
-    fs.ensureDirSync(AUTH_DIR);
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
     const sock = makeWASocket({
       auth: state,
       browser: Browsers.macOS("Chrome"),
       printQRInTerminal: false,
-      // Konfigurasi tambahan untuk mengatasi masalah koneksi
-      keepAliveIntervalMs: 10000, // Kirim pesan keep-alive setiap 10 detik
-      mobile: false, // Set ke false jika berjalan di server
-      connectTimeoutMs: 30000, // Timeout koneksi setelah 30 detik
+      keepAliveIntervalMs: 10000,
+      connectTimeoutMs: 30000,
+      mobile: false,
     });
 
     sock.ev.on("creds.update", saveCreds);
@@ -46,25 +47,24 @@ async function createSocket() {
         );
       } else if (connection === "close") {
         const shouldReconnect =
-          lastDisconnect?.error?.output?.statusCode !==
-          DisconnectReason.loggedOut;
+          lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
 
         if (shouldReconnect) {
           await bot.telegram.sendMessage(
             ADMIN_ID,
-            "⚠️ Koneksi terputus. Mencoba menghubungkan kembali..."
+            "⚠️ Koneksi terputus. Mencoba reconnect..."
           );
-          // Coba reconnect setelah beberapa detik
           setTimeout(createSocket, 5000);
         } else {
           await bot.telegram.sendMessage(
             ADMIN_ID,
-            "❌ Koneksi terputus dan tidak dapat dihubungkan kembali. Silakan pairing ulang."
+            "❌ Koneksi terputus permanen. Silakan pairing ulang."
           );
         }
       }
     });
 
+    globalSock = sock;
     return sock;
   } catch (error) {
     console.error("Error creating socket:", error);
@@ -80,8 +80,7 @@ bot.start(async (ctx) => {
   if (ctx.from.id.toString() !== ADMIN_ID)
     return ctx.reply("❌ Kamu bukan admin yang diizinkan.");
   ctx.reply("✅ Kirim nomor untuk pairing (contoh: 62812xxxxxxx)");
-  // Pastikan socket dibuat saat bot dimulai
-  await createSocket();
+  if (!globalSock) await createSocket();
 });
 
 bot.on("text", async (ctx) => {
@@ -95,11 +94,11 @@ bot.on("text", async (ctx) => {
   ctx.reply(`⏳ Membuat pairing code untuk nomor: ${number} ...`);
 
   try {
-    const sock = await createSocket();
-    if (!sock) {
-      return ctx.reply("❌ Gagal membuat socket WhatsApp.");
-    }
-    const pairing = await sock.requestPairingCode(number);
+    if (!globalSock) globalSock = await createSocket();
+    if (!globalSock)
+      return ctx.reply("❌ Gagal membuat koneksi WhatsApp.");
+
+    const pairing = await globalSock.requestPairingCode(number);
 
     if (pairing) {
       await bot.telegram.sendMessage(
@@ -117,4 +116,3 @@ bot.on("text", async (ctx) => {
 
 bot.launch();
 console.log("🤖 Bot Telegram aktif dan siap menerima nomor pairing...");
-      
